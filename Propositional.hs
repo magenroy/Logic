@@ -54,7 +54,6 @@ import qualified Data.List as List (nub, permutations)
 import Data.Maybe (fromJust, isJust)
 import Data.Array
 import Data.Set hiding (map, foldr, foldl)
-import Data.Tree
 
 
 data Proposition a = F | T | Atom a | Not (Proposition a) | Or (Proposition a) (Proposition a) | And (Proposition a) (Proposition a) deriving (Eq, Ord, Show, Read)
@@ -157,7 +156,6 @@ apply :: (Proposition a -> Proposition a) -> Proposition a -> Proposition a
 apply _ F = F
 apply _ T = T
 apply _ p@(Atom _) = p
-apply f (Not p) = Not $ f p
 apply f (Or p q) = Or (f p) (f q)
 apply f (And p q) = And (f p) (f q)
 
