@@ -1,16 +1,18 @@
+{-# LANGUAGE ConstraintKinds, MultiParamTypeClasses #-}
 module Propositional (
     Proposition(..),
     (&.),
     (|.),
     implies,
-    (==>),
+    (-->),
     implied,
-    (<==),
+    (<--),
     iff,
-    (<==>),
+    (<-->),
     nor,
     nand,
     xor,
+    ifThenElse,
     genericLength,
     length,
     get,
@@ -28,12 +30,21 @@ module Propositional (
     simplify,
     toNNF,
     deMorgan,
-    genericSubstitute,
     substitute,
-    genericInterpret,
+    substituteMap,
+    substituteIx,
+    replace,
+    replaceMap,
+    replaceIx,
+    sub1,
+    getVars,
     interpret,
-    genericTruthTable,
+    interpretMap,
+    interpretIx,
+    interpretationMaps,
     truthTable,
+    truthMap,
+    truthArray,
     distributeAllTop,
     distributeAll,
     distributeOrTop,
@@ -44,58 +55,55 @@ module Propositional (
     toDNF
 ) where
 
-import Prelude hiding (lookup, foldr, foldl, length)
+-- maybe I can fix the repetitiveness of "generic version, map version, array
+-- version" by making a lookup typeclass
+-- but then I need to be able to place constraints on the type of keys
+-- consider solution with ConstraintKinds and MultiParamTypeClasses
+
+import Prelude hiding (map, lookup, foldr, foldl, length)
 import Data.Traversable
 import Data.Monoid
-import Control.Applicative (Applicative, pure, (<*>), liftA2)
+import Control.Applicative (Applicative, pure, (<*>), liftA2, liftA3)
 import Control.Monad
-import Data.Foldable (find, Foldable, foldMap, foldr, foldl)
+import Data.Foldable (find, Foldable, foldMap, fold, foldr, foldl, toList)
 import qualified Data.List as List (nub, permutations)
 import Data.Maybe (fromJust, isJust)
 import Data.Array
-import Data.Set hiding (map, foldr, foldl)
-
+import Data.Set hiding (fold, foldr, foldl, toList)
+import qualified Data.Map as Map
 
 data Proposition a = F | T | Atom a | Not (Proposition a) | Or (Proposition a) (Proposition a) | And (Proposition a) (Proposition a) deriving (Eq, Ord, Show, Read)
 
--- use this to generate truth tables
-instance Ix i => Ix [i] where
-    range = traverse range . uncurry (liftA2 (,))
-    inRange = (and .) . (uncurry $ zipWith3 (\min max x -> min <= x && x <= max))
 
 infixr 3 &.
-(&.) :: Proposition a -> Proposition a -> Proposition a
-(&.) = And
 infixr 2 |.
-(|.) :: Proposition a -> Proposition a -> Proposition a
+infixr -->
+infixl <--
+infix <-->
+(&.), (|.), implies, (-->), implied, (<--), iff, (<-->), nor, nand, xor :: Proposition a -> Proposition a -> Proposition a
+
+(&.) = And
 (|.) = Or
 
-infixr ==>
-(==>) :: Proposition a -> Proposition a -> Proposition a
-implies :: Proposition a -> Proposition a -> Proposition a
-(==>) = implies
 implies = Or . Not
+(-->) = implies
 
-infixl <==
-(<==) :: Proposition a -> Proposition a -> Proposition a
-implied :: Proposition a -> Proposition a -> Proposition a
-(<==) = implied
 implied = flip implies
+(<--) = implied
 
-infix <==>
-(<==>) :: Proposition a -> Proposition a -> Proposition a
-iff :: Proposition a -> Proposition a -> Proposition a
-(<==>) = iff
 iff a b = implies a b &. implies b a
+(<-->) = iff
 
-nor :: Proposition a -> Proposition a -> Proposition a
 nor a b = Not (a |. b)
-
-nand :: Proposition a -> Proposition a -> Proposition a
 nand a b = Not (a &. b)
-
-xor :: Proposition a -> Proposition a -> Proposition a
 xor = iff . Not
+
+ifThenElse :: Proposition a -> Proposition a -> Proposition a -> Proposition a
+ifThenElse p q r = implies p q &. Or p r
+
+
+-- these should be semantic versions of above
+--entails, (==>), entailed, (<==), equiv, (<==>) :: Proposition a -> Proposition a -> Bool
 
 instance Functor Proposition where
     fmap _ F = F
@@ -139,6 +147,20 @@ instance Traversable Proposition where
     traverse f (Or p q) = liftA2 Or (traverse f p) (traverse f q)
     traverse f (And p q) = liftA2 And (traverse f p) (traverse f q)
 
+class Lookup l constr where
+    look :: constr a => a -> l a b -> Maybe b
+
+newtype Look t a b = Look {view :: (t (a, b))}
+
+instance Foldable t => Lookup (Look t) Eq where
+    look x = fmap snd . find ((x==) . fst) . view
+
+instance Lookup Map.Map Ord where
+    look = Map.lookup
+
+instance Lookup Array Ix where
+    look x arr = if inRange (bounds arr) x then Just $ arr ! x else Nothing
+
 genericLength :: Enum i => Foldable t => t a -> i
 genericLength = foldl (const . succ) (toEnum 0)
 
@@ -156,6 +178,7 @@ apply :: (Proposition a -> Proposition a) -> Proposition a -> Proposition a
 apply _ F = F
 apply _ T = T
 apply _ p@(Atom _) = p
+apply f (Not p) = Not $ f p
 apply f (Or p q) = Or (f p) (f q)
 apply f (And p q) = And (f p) (f q)
 
@@ -273,59 +296,75 @@ deMorgan p = p
 lookup :: (Foldable t, Eq a) => a -> t (a, b) -> Maybe b
 lookup x = fmap snd . find ((x==) . fst)
 
-genericSubstitute :: (Foldable t, Eq a, Functor f) => t (a, a) -> f a -> f a
-genericSubstitute interpretation = fmap sub
+substitute :: (Foldable t, Eq a, Functor f) => t (a, a) -> f a -> f a
+substitute interpretation = fmap sub
     where sub x = case lookup x interpretation of
 	    Nothing -> x
 	    Just y -> y
 
-substitute :: (Ix i, Functor f) => Array i i -> f i -> f i
-substitute interpretation = fmap $ \x -> if inRange (bounds interpretation) x then interpretation ! x else x
+-- can this be made less repetitive?
+substituteMap :: (Ord k, Functor f) => Map.Map k k -> f k -> f k
+substituteMap interpretation = fmap sub
+    where sub x = case Map.lookup x interpretation of
+	    Nothing -> x
+	    Just y -> y
+
+substituteIx :: (Ix i, Functor f) => Array i i -> f i -> f i
+substituteIx interpretation = fmap $ \x -> if inRange (bounds interpretation) x then interpretation ! x else x
 
 -- allows replacement by constants as well
-genericReplace :: (Foldable t, Eq a, Functor m, Monad m) => t (a, Either a (m a)) -> m a -> m a
-genericReplace interpretation = join . fmap sub
-    where sub x = case lookup x interpretation of
-	    Nothing -> return x
-	    Just (Left y) -> return y
-	    Just (Right y) -> y
+replace :: (Foldable t, Eq a, Functor m, Monad m) => t (a, (m a)) -> m a -> m a
+replace interpretation = join . fmap (\x -> let y = lookup x interpretation in if isJust y then fromJust y else return x)
 
-replace :: (Ix i, Functor m, Monad m) => Array i (Either i (m i)) -> m i -> m i
-replace interpretation = join . fmap (\x -> if not $ inRange (bounds interpretation) x then return x else case interpretation ! x of
-	Left y -> return y
-	Right y -> y)
+replaceMap :: (Ord k, Functor m, Monad m) => Map.Map k (m k) -> m k -> m k
+replaceMap interpretation = join . fmap (\x -> let y = Map.lookup x interpretation in if isJust y then fromJust y else return x)
 
--- this is actually just List.nub . toList
-genericGetVars :: Eq a => Proposition a -> [a]
-genericGetVars = List.nub . foldr (:) []
+replaceIx :: (Ix i, Functor m, Monad m) => Array i (m i) -> m i -> m i
+replaceIx interpretation = join . fmap (\x -> if inRange (bounds interpretation) x then interpretation ! x else return x)
 
--- generalize this type signature
-getVars :: Ord a => Proposition a -> Set a
+sub1 :: (Functor m, Monad m, Eq a) => a -> m a -> m a -> m a
+sub1 v w = replace [(v,w)]
+
+getVars :: (Foldable t, Ord a) => t a -> Set a
 getVars = foldr insert empty
 
-genericInterpret :: (Foldable t, Eq a) => Proposition a -> t (a, Bool) -> Maybe Bool
-genericInterpret F _ = Just False
-genericInterpret T _ = Just True
-genericInterpret (Atom v) t = lookup v t
-genericInterpret (Not p) t = fmap not $ genericInterpret p t
-genericInterpret (Or p q) t = liftA2 (||) (genericInterpret p t) (genericInterpret q t)
-genericInterpret (And p q) t = liftA2 (&&) (genericInterpret p t) (genericInterpret q t)
-
-interpret :: Ix i =>  Proposition i -> Array i Bool -> Maybe Bool
+interpret :: (Foldable t, Eq a) => Proposition a -> t (a, Bool) -> Maybe Bool
 interpret F _ = Just False
 interpret T _ = Just True
-interpret (Atom v) t = if inRange (bounds t) v then Just $ t ! v else Nothing
+interpret (Atom v) t = lookup v t
 interpret (Not p) t = fmap not $ interpret p t
 interpret (Or p q) t = liftA2 (||) (interpret p t) (interpret q t)
 interpret (And p q) t = liftA2 (&&) (interpret p t) (interpret q t)
 
-genericTruthTable :: Eq a => Proposition a -> [([(a, Bool)], Bool)]
-genericTruthTable prop = let ts = traverse (\var -> map ((,) var) [False, True]) $ genericGetVars prop in
-			fmap (liftA2 (,) id $ fromJust . genericInterpret prop) ts
+interpretMap :: Ord a => Proposition a -> Map.Map a Bool -> Maybe Bool
+interpretMap F _ = Just False
+interpretMap T _ = Just True
+interpretMap (Atom v) t = Map.lookup v t
+interpretMap (Not p) t = fmap not $ interpretMap p t
+interpretMap (Or p q) t = liftA2 (||) (interpretMap p t) (interpretMap q t)
+interpretMap (And p q) t = liftA2 (&&) (interpretMap p t) (interpretMap q t)
 
--- its probably better to do this with arrays
-truthTable :: Eq a => Proposition a -> [([(a, Bool)], Bool)]
-truthTable = genericTruthTable
+interpretIx :: Ix i =>  Proposition i -> Array i Bool -> Maybe Bool
+interpretIx F _ = Just False
+interpretIx T _ = Just True
+interpretIx (Atom v) t = if inRange (bounds t) v then Just $ t ! v else Nothing
+interpretIx (Not p) t = fmap not $ interpretIx p t
+interpretIx (Or p q) t = liftA2 (||) (interpretIx p t) (interpretIx q t)
+interpretIx (And p q) t = liftA2 (&&) (interpretIx p t) (interpretIx q t)
+
+-- this does not work as expected for all applicative f
+truthTable :: (Monoid (f Bool), Applicative f, Eq a) => Proposition a -> f ([(a, Bool)], Bool)
+truthTable prop = let ts = traverse (\var -> fmap ((,) var) $ pure False <> pure True) $ List.nub $ toList prop in fmap (liftA2 (,) id $ fromJust . interpret prop) ts
+
+truthMap :: Ord a => Proposition a -> Map.Map [Bool] Bool
+truthMap p = Map.mapKeysMonotonic Map.elems $ Map.fromSet (fromJust . interpretMap p) $ fromList $ interpretationMaps p
+
+truthArray = undefined
+
+-- this does not work as expected for all applicative f
+interpretationMaps :: (Monoid (f Bool), Applicative f, Ord a) => Proposition a -> f (Map.Map a Bool)
+interpretationMaps = sequenceA . Map.fromSet (const $ pure False <> pure True) . getVars
+-- make generic and array version later
 
 distributeAllTop :: Proposition a -> Proposition a
 distributeAllTop p@(Not _) = deMorgan p
@@ -362,6 +401,10 @@ distributeAnd (And p (Or q r)) = let p' = distributeAnd p in Or (And p' (distrib
 distributeAnd (And (Or p q) r) = let r' = distributeAnd r in Or (And (distributeAnd p) r') (And (distributeAnd q) r')
 distributeAnd p = p
 
+-- should write all of these manipulations in terms of valid rules of inference
+-- such as distributeOr etc
+
+-- this might be wrong
 toCNF :: Proposition a -> Proposition a
 toCNF (Not (Or p q)) = And (Not $ toCNF p) (Not $ toCNF q)
 toCNF (Not (And p q)) = Or (Not $ toCNF p) (Not $ toCNF q)
@@ -369,6 +412,7 @@ toCNF (Or p (And q r)) = let p' = toCNF p in And (Or p' (toCNF q)) (Or p' (toCNF
 toCNF (Or (And p q) r) = let r' = toCNF r in And (Or (toCNF p) r') (Or (toCNF q) r')
 toCNF p = p
 
+-- this might be wrong
 toDNF :: Proposition a -> Proposition a
 toDNF (Not (Or p q)) = And (Not $ toDNF p) (Not $ toDNF q)
 toDNF (Not (And p q)) = Or (Not $ toDNF p) (Not $ toDNF q)

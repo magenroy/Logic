@@ -1,13 +1,6 @@
 -- abstractions I've made along the way
-module Abstractions(
-    genericLength,
-    length,
-    lookup,
-    genericSubstitute,
-    substitute,
-    genericReplace,
-    replace
-) where
+-- not up-to-date
+module Abstractions where
 
 import Prelude hiding (lookup, foldr, foldl, length)
 import Data.Traversable
@@ -30,14 +23,14 @@ length = foldl (const . succ) 0
 lookup :: (Foldable t, Eq a) => a -> t (a, b) -> Maybe b
 lookup x = fmap snd . find ((x==) . fst)
 
-genericSubstitute :: (Foldable t, Eq a, Functor f) => t (a, a) -> f a -> f a
-genericSubstitute interpretation = fmap sub
+substitute :: (Foldable t, Eq a, Functor f) => t (a, a) -> f a -> f a
+substitute interpretation = fmap sub
     where sub x = case lookup x interpretation of
 	    Nothing -> x
 	    Just y -> y
 
-substitute :: (Ix i, Functor f) => Array i i -> f i -> f i
-substitute interpretation = fmap $ \x -> if inRange (bounds interpretation) x then interpretation ! x else x
+substituteIx :: (Ix i, Functor f) => Array i i -> f i -> f i
+substituteIx interpretation = fmap $ \x -> if inRange (bounds interpretation) x then interpretation ! x else x
 
 -- allows replacement by constants as well
 genericReplace :: (Foldable t, Eq a, Functor m, Monad m) => t (a, Either a (m a)) -> m a -> m a
@@ -51,3 +44,6 @@ replace :: (Ix i, Functor m, Monad m) => Array i (Either i (m i)) -> m i -> m i
 replace interpretation = join . fmap (\x -> if not $ inRange (bounds interpretation) x then return x else case interpretation ! x of
 	Left y -> return y
 	Right y -> y)
+
+getVars :: (Foldable t, Ord a) => t a -> Set a
+getVars = foldr insert empty
